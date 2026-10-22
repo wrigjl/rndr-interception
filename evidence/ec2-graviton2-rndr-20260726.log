@@ -1,0 +1,36 @@
+# EC2 Graviton2 FEAT_RNG probe - 2026-07-26
+instance-type: t4g.micro
+Linux ip-172-31-6-180 6.12.74+deb13+1-cloud-arm64 #1 SMP Debian 6.12.74-2 (2026-03-08) aarch64 GNU/Linux
+
+## lscpu
+Architecture:                            aarch64
+Vendor ID:                               ARM
+Model name:                              Neoverse-N1
+Thread(s) per core:                      1
+Core(s) per socket:                      2
+Socket(s):                               1
+
+## /proc/cpuinfo (cpu0)
+processor	: 0
+BogoMIPS	: 243.75
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp
+CPU implementer	: 0x41
+CPU architecture: 8
+CPU variant	: 0x3
+CPU part	: 0xd0c
+CPU revision	: 1
+
+
+## PMU
+armv8_pmuv3_0
+breakpoint
+kprobe
+software
+tracepoint
+uprobe
+
+## rndr_probe (static aarch64, built on Alpine 6.18.33)
+HWCAP2_RNG:              NOT set
+ID_AA64ISAR0_EL1:        0x0000100010211120 (RNDR field [63:60] = 0)
+MRS RNDR:                SIGILL (undefined)
+MRS RNDRRS:              SIGILL (undefined)

@@ -1,0 +1,31 @@
+=== rr.soft record 1 (-W software counters) ===
+rndr[0]=0x3f01d5ad5f89cc99
+rndr[1]=0x1c50bb287183020a
+rndr[2]=0xd0ae10b47e8dcf48
+rndr[3]=0x9089ec6cf969c726
+=== rr.soft record 2 (independent) ===
+rndr[0]=0x88119b8017654115
+rndr[1]=0xe68e7eaf3407e5ab
+rndr[2]=0xad072dd55d17d65a
+rndr[3]=0xbc9ec4e963759a94
+=== rr.soft replay of trace 1 ===
+rndr[0]=0x3f01d5ad5f89cc99
+rndr[1]=0x1c50bb287183020a
+rndr[2]=0xd0ae10b47e8dcf48
+rndr[3]=0x9089ec6cf969c726
+=== rr.soft replay of trace 2 ===
+rndr[0]=0x88119b8017654115
+rndr[1]=0xe68e7eaf3407e5ab
+rndr[2]=0xad072dd55d17d65a
+rndr[3]=0xbc9ec4e963759a94
+=== verdicts ===
+replay 1 == record 1 (bit-identical)
+replay 2 == record 2 (bit-identical)
+record 1 != record 2 (real entropy)
+=== module interception evidence (dmesg tail) ===
+[ 1657.574480] rr_entropy_monitor: registered tgid 1419 pgd_base 0x43ca1d00
+[ 1657.855613] rr_entropy_monitor: exec: tgid 1419 old pgd_base 0x43ca1d00 -> new pgd_base 0x43ca1180
+[ 1667.933159] rr_entropy_monitor: exit: deregistered tgid 1419
+[ 1669.341203] rr_entropy_monitor: registered tgid 1422 pgd_base 0x43ca1180
+[ 1669.583405] rr_entropy_monitor: exec: tgid 1422 old pgd_base 0x43ca1180 -> new pgd_base 0x43ca1380
+[ 1679.289724] rr_entropy_monitor: exit: deregistered tgid 1422

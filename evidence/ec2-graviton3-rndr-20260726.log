@@ -1,0 +1,40 @@
+# EC2 Graviton3 FEAT_RNG probe - 2026-07-26
+instance-type: c7g.medium
+Linux ip-172-31-37-160 6.12.74+deb13+1-cloud-arm64 #1 SMP Debian 6.12.74-2 (2026-03-08) aarch64 GNU/Linux
+
+## lscpu
+Architecture:                            aarch64
+Vendor ID:                               ARM
+Model name:                              Neoverse-V1
+Thread(s) per core:                      1
+Core(s) per socket:                      1
+Socket(s):                               1
+
+## /proc/cpuinfo (cpu0)
+processor	: 0
+BogoMIPS	: 2100.00
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm paca pacg dcpodp svei8mm svebf16 i8mm bf16 dgh rng
+CPU implementer	: 0x41
+CPU architecture: 8
+CPU variant	: 0x1
+CPU part	: 0xd40
+CPU revision	: 1
+
+
+## PMU
+armv8_pmuv3_0
+breakpoint
+kprobe
+software
+tracepoint
+uprobe
+
+## rndr_probe (static aarch64, built on Alpine 6.18.33)
+HWCAP2_RNG:              set
+ID_AA64ISAR0_EL1:        0x1011111110212120 (RNDR field [63:60] = 1)
+MRS RNDR:                executed, ok=1 val=0x7428b89a1447ebb8
+MRS RNDRRS:              executed, ok=1 val=0x35a0ab417dd5f1d6
+
+## rndr_probe second run (values must differ - real entropy)
+MRS RNDR:                executed, ok=1 val=0xd83abd771a324137
+MRS RNDRRS:              executed, ok=1 val=0x4fd5167caba73210

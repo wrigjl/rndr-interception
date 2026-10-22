@@ -1,0 +1,8 @@
+EL3: started, SCR_EL3.TRNDR set
+EL2: arrived after eret
+EL2: reading ID_AA64ISAR0_EL1.RNDR
+PASS: ID_AA64ISAR0_EL1.RNDR reads 1 under TRNDR
+EL2: executing MRS x0, RNDR
+PASS: RNDR trapped to EL3 (EC=0x18)
+ESR_EL3 = 0x000000006230c809
+qemu-system-aarch64: terminating on signal 15

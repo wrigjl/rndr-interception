@@ -1,0 +1,8 @@
+ qemu-system-aar-905     [001] .....  2159.600305: kvm_handle_sys_reg: HSR 0x6230c889
+ qemu-system-aar-905     [001] .....  2159.601338: kvm_sys_access: PC: aaaacc200fb0 SYS_RNDR_EL0 (3,3,2,4,0) read
+ qemu-system-aar-905     [001] .....  2159.606677: kvm_handle_sys_reg: HSR 0x6232c889
+ qemu-system-aar-905     [001] .....  2159.606720: kvm_sys_access: PC: aaaacc200f48 SYS_RNDRRS_EL0 (3,3,2,4,1) read
+ qemu-system-aar-905     [002] .....  2159.823339: kvm_handle_sys_reg: HSR 0x6230c889
+ qemu-system-aar-905     [002] .....  2159.823385: kvm_sys_access: PC: aaaacc200fb0 SYS_RNDR_EL0 (3,3,2,4,0) read
+ qemu-system-aar-905     [002] .....  2159.824001: kvm_handle_sys_reg: HSR 0x6232c889
+ qemu-system-aar-905     [002] .....  2159.824036: kvm_sys_access: PC: aaaacc200f48 SYS_RNDRRS_EL0 (3,3,2,4,1) read

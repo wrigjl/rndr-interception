@@ -1,0 +1,3 @@
+0001-arm64-kvm-rng-trap-smoke-test.patch
+0002-arm64-kvm-emulate-RNDR-RNDRRS-via-host.patch
+0004-arm64-kvm-rndr-rndrrs-per-process-interception.patch

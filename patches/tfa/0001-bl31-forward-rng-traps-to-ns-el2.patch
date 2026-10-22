@@ -1,0 +1,268 @@
+From d44827fc3626a887f5d44677b463829b3f9b81db Mon Sep 17 00:00:00 2001
+From: Jason L. Wright <wrigjaso@isu.edu>
+Date: Sun, 17 May 2026 15:25:12 -0600
+Subject: [PATCH] bl31: forward FEAT_RNG_TRAP RNDR/RNDRRS traps to NS-EL2
+
+Add an optional EL3->NS-EL2 forwarding path for RNDR/RNDRRS traps
+caught by FEAT_RNG_TRAP. With RNG_TRAP_FORWARD_TO_EL2=1, instead of
+emulating the read locally at EL3 (the upstream behaviour), bl31_traps.c
+re-raises the trap
+at NS-EL2 with a verbatim syndrome, so an EL2 software stack can
+apply policy on RNDR/RNDRRS reads.
+
+The intended consumer at NS-EL2 is a KVM extension that applies
+per-process record-and-replay policy to RNDR/RNDRRS reads.
+
+Mechanism:
+
+  - A new return code, TRAP_RET_FORWARDED, tells the EL3 sync-exception
+    dispatcher that the trap handler has already programmed CTX_ELR_EL3
+    and CTX_SPSR_EL3 to land at a lower EL's sync vector; the dispatcher
+    must not advance ELR_EL3 past the trapping instruction.
+
+  - The new helper rng_trap_forward_to_el2() (bl31/rng_trap_forward.c)
+    is the architectural EL3->NS-EL2 staging code. It copies ESR_EL3
+    verbatim into ESR_EL2 (the EC=0x18 ISS layout is identical, so
+    Op0/Op1/Op2/CRn/CRm/Rt/Direction reach EL2 without instruction-byte
+    fetch), preserves the trapping ELR/SPSR in ELR_EL2/SPSR_EL2, zeros
+    FAR_EL2 (unused for EC=0x18), and rewrites CTX_ELR_EL3 to
+    VBAR_EL2 + LOWER_EL_AARCH64. CTX_SPSR_EL3 is rebuilt for entry to
+    EL2h via the existing create_spsr() helper used by inject_undef64().
+
+  - bl31_traps.c gains a small #if RNG_TRAP_FORWARD_TO_EL2 wedge near
+    the top of the RNG-trap branch that calls the forwarder, with two
+    runtime guards: el_implemented(2) != EL_IMPL_NONE (no destination
+    if EL2 is not implemented) and GET_EL(spsr) != MODE_EL2 (forwarding
+    back to the EL that issued the read would just re-trap). Either
+    falls through to the existing local-emulate path.
+
+  - The build flag is declared in plat/qemu/qemu/platform.mk inside
+    the existing ENABLE_FEAT_RNG_TRAP block. Defaults to 0; when set
+    to 1, it adds bl31/rng_trap_forward.c to BL31_SOURCES and defines
+    RNG_TRAP_FORWARD_TO_EL2 for the compiler. No CPU/feature build-time
+    gate is required because the runtime el_implemented() check handles
+    the CPU-without-EL2 case.
+
+Build/test (macOS arm64, Darwin 25.5.0, aarch64-elf-gcc):
+
+  - RNG_TRAP_FORWARD_TO_EL2=0 (default): builds clean; the existing
+    bl33-rndr test boots and prints "BL33: PASS" via the local-emulate
+    path, byte-identical to the prior commit on this branch.
+  - RNG_TRAP_FORWARD_TO_EL2=1: builds clean; the same bl33-rndr test
+    boots and prints "BL33: PASS" via the case-C local-emulate
+    fallback (the test BL33 runs at NS-EL2, so the runtime guard skips
+    the forwarder). QEMU exception log confirms a single EC=0x18 trap
+    to EL3 followed by eret back to the post-MRS instruction, with no
+    extra exception traffic.
+
+End-to-end exercise of the forwarding path (a BL33 that drops from
+NS-EL2 to NS-EL1 and traps from NS-EL1, with an EL2 sync vector
+installed) is deferred to the next phase.
+
+Signed-off-by: Jason L. Wright <wrigjaso@isu.edu>
+---
+ bl31/bl31_traps.c          | 19 ++++++++
+ bl31/rng_trap_forward.c    | 95 ++++++++++++++++++++++++++++++++++++++
+ common/runtime_svc.c       |  8 ++++
+ include/bl31/sync_handle.h |  5 ++
+ plat/qemu/qemu/platform.mk | 10 ++++
+ 5 files changed, 137 insertions(+)
+ create mode 100644 bl31/rng_trap_forward.c
+
+diff --git a/bl31/bl31_traps.c b/bl31/bl31_traps.c
+index 15090432c..a4faeb6ec 100644
+--- a/bl31/bl31_traps.c
++++ b/bl31/bl31_traps.c
+@@ -46,6 +46,25 @@ int handle_sysreg_trap(uint64_t esr_el3, cpu_context_t *ctx, u_register_t flags)
+ 		/* Only expect reads, write shouldn't be possible. */
+ 		assert(EXTRACT(ISS_SYS64_DIR, esr_el3) != 0);
+ 
++#if RNG_TRAP_FORWARD_TO_EL2
++		/*
++		 * Forwarding hook: re-raise the trap at NS-EL2 with a
++		 * verbatim syndrome instead of emulating locally, so an
++		 * EL2 software stack (e.g. KVM) can apply per-process
++		 * record-and-replay policy on RNDR/RNDRRS.
++		 *
++		 * Two cases fall through to local emulation:
++		 *   - EL2 is not implemented on this CPU; there is nothing
++		 *     to forward to.
++		 *   - The trap originated at EL2 itself; forwarding back to
++		 *     the EL that issued the read would just re-trap.
++		 */
++		if (el_implemented(2) != EL_IMPL_NONE &&
++		    GET_EL(read_ctx_reg(state, CTX_SPSR_EL3)) != MODE_EL2) {
++			return rng_trap_forward_to_el2(ctx, esr_el3);
++		}
++#endif
++
+ 		/* Successful reads should have NZCV == 0 */
+ 		new_spsr = read_ctx_reg(state, CTX_SPSR_EL3);
+ 		new_spsr &= ~SPSR_NZCV;
+diff --git a/bl31/rng_trap_forward.c b/bl31/rng_trap_forward.c
+new file mode 100644
+index 000000000..1bdbc9c29
+--- /dev/null
++++ b/bl31/rng_trap_forward.c
+@@ -0,0 +1,95 @@
++/*
++ * Copyright (c) 2026, Jason L. Wright.
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
++ *
++ * Re-raise RNDR/RNDRRS traps at NS-EL2 instead of emulating them at EL3.
++ *
++ * The default plat_handle_rng_trap() (see bl31/bl31_traps.c) services
++ * RNDR/RNDRRS reads locally: it asks the platform for a value, writes
++ * it into the lower EL's saved Xt, clears NZCV, and resumes the lower
++ * EL one instruction past the trapping MRS. That is the right thing
++ * for firmware-side entropy provisioning.
++ *
++ * The record-and-replay context this file supports needs the opposite
++ * behavior: deliver the trap to NS-EL2 with the architectural syndrome
++ * intact, so an EL2 software stack (e.g. KVM with a per-process
++ * record-and-replay extension) decides what value the guest observes.
++ *
++ * Build with RNG_TRAP_FORWARD_TO_EL2=1. The dispatcher in bl31_traps.c
++ * skips the forwarder and falls back to local emulation if either
++ * (a) EL2 is not implemented on the CPU or (b) the trap originated at
++ * EL2 itself, so no CPU/feature build-time gate is required.
++ *
++ * This file is an experiment-support extension and is not intended
++ * for upstream submission to TrustedFirmware.org.
++ */
++
++#include <assert.h>
++
++#include <arch.h>
++#include <arch_helpers.h>
++#include <bl31/sync_handle.h>
++#include <context.h>
++#include <lib/el3_runtime/context_mgmt.h>
++
++int rng_trap_forward_to_el2(cpu_context_t *ctx, uint64_t esr_el3)
++{
++	el3_state_t *state = get_el3state_ctx(ctx);
++	u_register_t old_spsr = read_ctx_reg(state, CTX_SPSR_EL3);
++	u_register_t old_elr = read_ctx_reg(state, CTX_ELR_EL3);
++	u_register_t scr_el3 = read_ctx_reg(state, CTX_SCR_EL3);
++	u_register_t new_spsr;
++
++	/*
++	 * Caller (bl31_traps.c) has already ensured the trap originated
++	 * below EL2. Forwarding from EL2 itself would loop, since the
++	 * re-raised trap would land at the same EL with TRNDR still set.
++	 */
++	assert(GET_EL(old_spsr) != MODE_EL2);
++
++	/*
++	 * ESR_EL2 and ESR_EL3 share an identical layout for EC=0x18.
++	 * Copy the syndrome verbatim: EC, IL, and the ISS encoding of
++	 * Op0/Op1/Op2/CRn/CRm/Rt/Direction are exactly what an EL2
++	 * handler needs to identify the instruction and the destination
++	 * register, without instruction-byte fetch.
++	 */
++	write_esr_el2(esr_el3);
++
++	/*
++	 * ELR_EL2 points at the trapping MRS so EL2 can return to it
++	 * after supplying a value. SPSR_EL2 is the lower EL's PSTATE at
++	 * trap time, so EL2 sees the original NZCV/DAIF/EL fields.
++	 */
++	write_elr_el2(old_elr);
++	write_spsr_el2(old_spsr);
++
++	/*
++	 * FAR_EL2 has no architectural meaning for EC=0x18 (no faulting
++	 * VA), but leaving it stale across forwards would confuse an EL2
++	 * handler that logs FAR for diagnostics. Zero it deliberately.
++	 */
++	write_far_el2(0);
++
++	/*
++	 * Compute the new ELR_EL3: the entry vector at NS-EL2 for a
++	 * synchronous exception from a lower EL in AArch64 state.
++	 * We have already established old EL < EL2, so this is always
++	 * the "Lower EL, AArch64" entry (VBAR_EL2 + 0x400).
++	 */
++	write_ctx_reg(state, CTX_ELR_EL3,
++		      read_vbar_el2() + LOWER_EL_AARCH64);
++
++	/*
++	 * Compute the new SPSR_EL3 for entry to EL2h, following the
++	 * architectural AArch64.TakeException pseudocode. create_spsr()
++	 * is the same helper used by inject_undef64() for the same job;
++	 * upstream added the scr_el3 argument so it can honor VHE/TGE when
++	 * choosing the target PSTATE fields.
++	 */
++	new_spsr = create_spsr(old_spsr, MODE_EL2, scr_el3);
++	write_ctx_reg(state, CTX_SPSR_EL3, new_spsr);
++
++	return TRAP_RET_FORWARDED;
++}
+diff --git a/common/runtime_svc.c b/common/runtime_svc.c
+index 00b79038b..c8864d6c7 100644
+--- a/common/runtime_svc.c
++++ b/common/runtime_svc.c
+@@ -261,6 +261,14 @@ void handler_sync_exception(cpu_context_t *ctx)
+ 		} else if (ret == TRAP_RET_REPEAT) {
+ 			/* continue at the same instruction */
+ 			return;
++		} else if (ret == TRAP_RET_FORWARDED) {
++			/*
++			 * The handler has re-staged the trap at a lower EL by
++			 * programming that EL's syndrome and the EL3 eret
++			 * state. Return without touching ELR_EL3; the eret
++			 * will land at the lower EL's sync vector.
++			 */
++			return;
+ 		}
+ #if FFH_SUPPORT
+ 	/* If FFH Support then try to handle lower EL EA exceptions. */
+diff --git a/include/bl31/sync_handle.h b/include/bl31/sync_handle.h
+index a238e7670..f207b950e 100644
+--- a/include/bl31/sync_handle.h
++++ b/include/bl31/sync_handle.h
+@@ -14,6 +14,7 @@
+ #define TRAP_RET_UNHANDLED		-1
+ #define TRAP_RET_REPEAT			0
+ #define TRAP_RET_CONTINUE		1
++#define TRAP_RET_FORWARDED		2
+ 
+ #define XZR_REG_NUM   31
+ 
+@@ -47,6 +48,10 @@ void inject_sync_ea64(el3_state_t *state, u_register_t esr_el3);
+ 
+ u_register_t create_spsr(u_register_t old_spsr, unsigned int target_el, u_register_t scr_el3);
+ 
++#if RNG_TRAP_FORWARD_TO_EL2
++int rng_trap_forward_to_el2(cpu_context_t *ctx, uint64_t esr_el3);
++#endif
++
+ /* Prototypes for system register emulation handlers provided by platforms. */
+ int plat_handle_impdef_trap(uint64_t esr_el3, cpu_context_t *ctx);
+ #if ENABLE_FEAT_RNG_TRAP
+diff --git a/plat/qemu/qemu/platform.mk b/plat/qemu/qemu/platform.mk
+index b0c1cdff4..82731975b 100644
+--- a/plat/qemu/qemu/platform.mk
++++ b/plat/qemu/qemu/platform.mk
+@@ -177,6 +177,16 @@ endif
+ 
+ ifneq (${ENABLE_FEAT_RNG_TRAP},0)
+ BL31_SOURCES		+=	plat/qemu/qemu/qemu_sync_traps.c
++
++# Optionally forward RNDR/RNDRRS traps to NS-EL2 instead of emulating
++# at EL3. Disabled by default. The forwarder checks el_implemented(2) at
++# trap time and falls back to local emulation on CPUs without EL2, so no
++# build-time CPU/feature gate is required.
++RNG_TRAP_FORWARD_TO_EL2 ?= 0
++ifeq (${RNG_TRAP_FORWARD_TO_EL2},1)
++BL31_SOURCES		+=	bl31/rng_trap_forward.c
++$(eval $(call add_define,RNG_TRAP_FORWARD_TO_EL2))
++endif
+ endif
+ endif
+ 
+-- 
+2.50.1 (Apple Git-155)
+

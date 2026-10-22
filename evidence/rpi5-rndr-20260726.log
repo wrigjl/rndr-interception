@@ -1,0 +1,42 @@
+# Raspberry Pi 5 FEAT_RNG probe - 2026-07-27
+board: Raspberry Pi 5 Model B Rev 1.1
+Linux rpi5 6.17.0-1008-raspi #8-Ubuntu SMP PREEMPT_DYNAMIC Wed Jan 21 19:58:42 UTC 2026 aarch64 GNU/Linux
+
+## lscpu
+Architecture:                            aarch64
+Vendor ID:                               ARM
+Model name:                              Cortex-A76
+Thread(s) per core:                      1
+Core(s) per cluster:                     4
+Socket(s):                               -
+
+## /proc/cpuinfo (cpu0)
+processor	: 0
+BogoMIPS	: 108.00
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp
+CPU implementer	: 0x41
+CPU architecture: 8
+CPU variant	: 0x4
+CPU part	: 0xd0b
+CPU revision	: 1
+
+
+## PMU
+armv8_cortex_a76
+breakpoint
+kprobe
+software
+tracepoint
+uprobe
+
+## rndr_probe (static aarch64, built on this host)
+HWCAP2_RNG:              NOT set
+ID_AA64ISAR0_EL1:        0x0000100010211120 (RNDR field [63:60] = 0)
+MRS RNDR:                SIGILL (undefined)
+MRS RNDRRS:              SIGILL (undefined)
+
+## rndr_probe second run (cross-run comparison)
+HWCAP2_RNG:              NOT set
+ID_AA64ISAR0_EL1:        0x0000100010211120 (RNDR field [63:60] = 0)
+MRS RNDR:                SIGILL (undefined)
+MRS RNDRRS:              SIGILL (undefined)

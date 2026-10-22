@@ -1,0 +1,9 @@
+rndr_intercept_test: pid 915
+registered; expect SIGILL:
+  RNDR     PASS (intercepted -> SIGILL)
+  RNDRRS   PASS (intercepted -> SIGILL)
+deregistered; expect normal completion:
+  RNDR     PASS (completed: ok=1 val=0x8991d62a33468f82)
+  RNDRRS   PASS (completed: ok=1 val=0x92a4ccfb73a1c019)
+
+PASS

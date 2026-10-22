@@ -1,0 +1,225 @@
+diff --git a/src/RecordSession.cc b/src/RecordSession.cc
+index dd005f4e..7c5f4e6e 100644
+--- a/src/RecordSession.cc
++++ b/src/RecordSession.cc
+@@ -2599,6 +2599,11 @@ RecordSession::RecordSession(const std::string& exe_path,
+     }
+   }
+ 
++  if (rrmon_register_tid(t->tid)) {
++    LOG(info) << "Registered tracee " << t->tid
++              << " with rr-entropy-monitor (RNDR/RNDRRS interception)";
++  }
++
+   initial_thread_group = t->thread_group();
+   on_create(t);
+ }
+diff --git a/src/ReplaySession.cc b/src/ReplaySession.cc
+index 6afeb3b7..c87322da 100644
+--- a/src/ReplaySession.cc
++++ b/src/ReplaySession.cc
+@@ -427,6 +427,14 @@ Task* ReplaySession::new_task(pid_t tid, pid_t rec_tid, uint32_t serial,
+                   session->trace_reader().peek_frame().tid()));
+   session->on_create(t);
+ 
++  // Register the replay tracee so its RNDR/RNDRRS trap (KVM UNDEF -> SIGILL)
++  // during replay too; the recorded INSTRUCTION_TRAP register state is then
++  // restored at each trap.  Harmless if the trace used no interception.
++  if (rrmon_register_tid(t->tid)) {
++    LOG(info) << "Registered replay tracee " << t->tid
++              << " with rr-entropy-monitor";
++  }
++
+   return session;
+ }
+ 
+@@ -1338,10 +1346,20 @@ Completion ReplaySession::emulate_deterministic_signal(
+       }
+     }
+   }
+-  ASSERT(t, t->stop_sig() == sig)
+-      << "Replay got unrecorded signal " << signal_name(t->stop_sig())
+-      << " (expecting " << signal_name(sig) << ")"
+-      << "\n" << t->get_siginfo();
++  if (EV_INSTRUCTION_TRAP == ev.type()) {
++    // Emulated instructions trap deterministically with SIGSEGV (CNTVCT/
++    // RDTSC/CPUID via faulting) or SIGILL (RNDR/RNDRRS via the monitor
++    // module's injected UNDEF).  Accept either; the recorded register state
++    // is what drives the emulation below.
++    ASSERT(t, t->stop_sig() == SIGSEGV || t->stop_sig() == SIGILL)
++        << "Replay got unexpected signal " << signal_name(t->stop_sig())
++        << " for an emulated instruction trap\n" << t->get_siginfo();
++  } else {
++    ASSERT(t, t->stop_sig() == sig)
++        << "Replay got unrecorded signal " << signal_name(t->stop_sig())
++        << " (expecting " << signal_name(sig) << ")"
++        << "\n" << t->get_siginfo();
++  }
+   check_ticks_consistency(t, ev);
+ 
+   if (EV_INSTRUCTION_TRAP == ev.type()) {
+diff --git a/src/record_signal.cc b/src/record_signal.cc
+index 2d1c400e..23e4ea63 100644
+--- a/src/record_signal.cc
++++ b/src/record_signal.cc
+@@ -159,6 +159,50 @@ static bool try_handle_trapped_instruction(RecordTask* t, siginfo_t* si) {
+   return true;
+ }
+ 
++/**
++ * Return true if |t| was stopped because of a SIGILL from a monitored
++ * RNDR/RNDRRS instruction (the rr-entropy-monitor module makes KVM inject
++ * UNDEF -> SIGILL for a registered process) and |t| was updated
++ * appropriately.
++ *
++ * We substitute a fresh entropy value into the destination register, set
++ * NZCV = 0b0000 (architected success), advance past the instruction, and
++ * record an instruction_trap event.  The value rides in the recorded
++ * register state, so replay reproduces it deterministically via
++ * set_regs(trace_frame.regs()) -- no separate trace event is needed (cf.
++ * how CNTVCT/RDTSC are handled).
++ */
++static bool try_handle_rndr_trap(RecordTask* t, siginfo_t* si) {
++  ASSERT(t, si->si_signo == SIGILL);
++
++  auto special = special_instruction_at(t, t->ip());
++  if (special.opcode != SpecialInstOpcode::ARM_MRS_RNDR &&
++      special.opcode != SpecialInstOpcode::ARM_MRS_RNDRRS) {
++    return false;
++  }
++
++  uint64_t value = 0;
++  good_random(&value, sizeof(value));
++
++  Registers r = t->regs();
++  if (special.regno != 31) {  // Rt == 31 encodes XZR: the write is discarded
++    r.set_x(special.regno, value);
++  }
++  r.set_nzcv(0);  // success
++
++  r.set_ip(r.ip() + special_instruction_len(special.opcode));
++  t->set_regs(r);
++
++  LOG(debug) << " trapped for "
++             << (special.opcode == SpecialInstOpcode::ARM_MRS_RNDR ? "rndr"
++                                                                   : "rndrrs")
++             << ": x" << special.regno << " -> " << HEX(value);
++
++  t->record_event(Event::instruction_trap());
++  t->push_event(Event::noop());
++  return true;
++}
++
+ /**
+  * Return true if |t| was stopped because of a SIGSEGV and we want to retry
+  * the instruction after emulating MAP_GROWSDOWN.
+@@ -785,6 +829,13 @@ SignalHandled handle_signal(RecordTask* t, siginfo_t* si,
+       return SIGNAL_HANDLED;
+     }
+ 
++    if (sig == SIGILL && try_handle_rndr_trap(t, si)) {
++      if (signal_was_blocked || t->is_sig_ignored(sig)) {
++        restore_signal_state(t, sig, signal_was_blocked);
++      }
++      return SIGNAL_HANDLED;
++    }
++
+     // Since we're not undoing the kernel's changes, update our signal handler
+     // state to match the kernel's.
+     if (signal_was_blocked || t->is_sig_ignored(sig)) {
+diff --git a/src/util.cc b/src/util.cc
+index 6754dead..57b299ac 100644
+--- a/src/util.cc
++++ b/src/util.cc
+@@ -13,6 +13,7 @@
+ #include <openssl/sha.h>
+ 
+ #include <fcntl.h>
++#include <sys/ioctl.h>
+ #include <inttypes.h>
+ #include <limits.h>
+ #include <linux/capability.h>
+@@ -1929,6 +1930,32 @@ ScopedFd open_memory_file(const std::string &name) {
+   return fd;
+ }
+ 
++// rr-entropy-monitor guest module control device ABI (mirrors
++// guest-module/rr_entropy_monitor.h in this artifact).
++#define RRMON_DEVICE_PATH "/dev/rr-entropy-monitor"
++#define RRMON_IOC_MAGIC 0xE7
++#define RRMON_IOC_REGISTER _IOW(RRMON_IOC_MAGIC, 1, int32_t)
++#define RRMON_IOC_DEREGISTER _IOW(RRMON_IOC_MAGIC, 2, int32_t)
++
++static bool rrmon_ioctl_tid(unsigned long cmd, pid_t tid) {
++  int fd = open(RRMON_DEVICE_PATH, O_RDWR | O_CLOEXEC);
++  if (fd < 0) {
++    return false;
++  }
++  int32_t pid = tid;
++  int ret = ioctl(fd, cmd, &pid);
++  close(fd);
++  return ret >= 0;
++}
++
++bool rrmon_register_tid(pid_t tid) {
++  return rrmon_ioctl_tid(RRMON_IOC_REGISTER, tid);
++}
++
++bool rrmon_deregister_tid(pid_t tid) {
++  return rrmon_ioctl_tid(RRMON_IOC_DEREGISTER, tid);
++}
++
+ void good_random(void* out, size_t out_len) {
+   ScopedFd fd("/dev/urandom", O_RDONLY);
+   uint8_t* o = static_cast<uint8_t*>(out);
+@@ -2016,6 +2043,13 @@ SpecialInst special_instruction_at(Task* t, remote_code_ptr ip) {
+     if ((insn_word & 0xffffffe0) == 0xd53be0c0) {
+       return {SpecialInstOpcode::ARM_MRS_CNTVCTSS_EL0, insn_word & 31};
+     }
++    // RNDR = MRS Xt, S3_3_C2_C4_0 ; RNDRRS = MRS Xt, S3_3_C2_C4_1
++    if ((insn_word & 0xffffffe0) == 0xd53b2400) {
++      return {SpecialInstOpcode::ARM_MRS_RNDR, insn_word & 31};
++    }
++    if ((insn_word & 0xffffffe0) == 0xd53b2420) {
++      return {SpecialInstOpcode::ARM_MRS_RNDRRS, insn_word & 31};
++    }
+   }
+   return {SpecialInstOpcode::NONE};
+ }
+@@ -2035,7 +2069,9 @@ size_t special_instruction_len(SpecialInstOpcode insn) {
+     return sizeof(pushf16_insn);
+   } else if (insn == SpecialInstOpcode::ARM_MRS_CNTFRQ_EL0 ||
+              insn == SpecialInstOpcode::ARM_MRS_CNTVCT_EL0 ||
+-             insn == SpecialInstOpcode::ARM_MRS_CNTVCTSS_EL0) {
++             insn == SpecialInstOpcode::ARM_MRS_CNTVCTSS_EL0 ||
++             insn == SpecialInstOpcode::ARM_MRS_RNDR ||
++             insn == SpecialInstOpcode::ARM_MRS_RNDRRS) {
+     return 4;
+   } else {
+     return 0;
+diff --git a/src/util.h b/src/util.h
+index 6be66b7c..2dfb3bcd 100644
+--- a/src/util.h
++++ b/src/util.h
+@@ -483,6 +483,12 @@ ScopedFd create_memfd_file(const std::string &real_name);
+ 
+ void good_random(void* out, size_t out_len);
+ 
++/* Register/deregister a thread-group id with the guest rr-entropy-monitor
++ * kernel module so its RNDR/RNDRRS execute-time traps (KVM UNDEF -> SIGILL)
++ * are delivered.  Return true on success; false if the device is absent. */
++bool rrmon_register_tid(pid_t tid);
++bool rrmon_deregister_tid(pid_t tid);
++
+ std::vector<std::string> current_env();
+ 
+ enum class SpecialInstOpcode {
+@@ -496,6 +502,8 @@ enum class SpecialInstOpcode {
+   X86_INT3,
+   X86_PUSHF,
+   X86_PUSHF16,
++  ARM_MRS_RNDR,
++  ARM_MRS_RNDRRS,
+ };
+ 
+ struct SpecialInst {

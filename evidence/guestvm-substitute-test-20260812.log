@@ -1,0 +1,16 @@
+--- run 1:
+rndr_substitute_test: replaying 8 recorded values
+  RNDR     #0: ok=1 val=0x524e44525f303030 (== recorded)
+  RNDRRS   #1: ok=1 val=0x524e44525f303031 (== recorded)
+  RNDR     #2: ok=1 val=0x524e44525f303032 (== recorded)
+  RNDRRS   #3: ok=1 val=0x524e44525f303033 (== recorded)
+  RNDR     #4: ok=1 val=0x524e44525f303034 (== recorded)
+  RNDRRS   #5: ok=1 val=0x524e44525f303035 (== recorded)
+  RNDR     #6: ok=1 val=0x524e44525f303036 (== recorded)
+  RNDRRS   #7: ok=1 val=0x524e44525f303037 (== recorded)
+digest: 0x3f5cc68f032e2bfd
+PASS
+--- run 2 md5 comparison:
+18b32abf5e7bc9a20769def2cbf98339  sub1.out
+18b32abf5e7bc9a20769def2cbf98339  sub2.out
+BIT-IDENTICAL

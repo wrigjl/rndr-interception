@@ -1,0 +1,22 @@
+=== record 1 (--monitor) ===
+rndr_rr: record; entropy source = RNDR (host)
+rndr_rr: record complete: 4 entropy read(s), stream digest 0x77b2b7965c7b32fe
+rndr[0]=0x08732071d44a249c
+rndr[1]=0x7393b86dff72cb52
+rndr[2]=0x9286bf760437e4f1
+rndr[3]=0xb89a5cc68dbbcf04
+=== record 2 (--monitor, independent) ===
+rndr[0]=0x99b853d56154d1ee
+rndr[1]=0xe7006489d527a7ba
+rndr[2]=0x62a34bc54304eb63
+rndr[3]=0x3d309640344eab22
+=== replay of record 1 (--monitor) ===
+rndr_rr: replay from r1.log
+rndr_rr: replay complete: 4 entropy read(s), stream digest 0x77b2b7965c7b32fe, 0 divergence(s)
+rndr[0]=0x08732071d44a249c
+rndr[1]=0x7393b86dff72cb52
+rndr[2]=0x9286bf760437e4f1
+rndr[3]=0xb89a5cc68dbbcf04
+=== verdicts ===
+replay == record 1 (bit-identical)
+record 1 != record 2 (real entropy)

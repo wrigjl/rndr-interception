@@ -1,0 +1,93 @@
+arm64: kvm: emulate guest RNDR/RNDRRS reads via host hardware
+
+When TF-A is built with our RNG_TRAP_FORWARD_TO_EL2 patch the EL3
+firmware re-stages guest MRS RNDR/RNDRRS traps as EL2 sync exceptions
+with the original ESR copied verbatim into ESR_EL2.  Stock KVM has no
+sys_reg_descs[] entry for SYS_RNDR_EL0 / SYS_RNDRRS_EL0, so triage of
+the forwarded EC=0x18 syndrome falls through to undef_access and the
+guest takes an UNDEF on what should look like a real entropy read.
+
+Emulate the read by issuing the same MRS on the host (via the existing
+__arm64_rndr / __arm64_rndrrs helpers in asm/archrandom.h) and copying
+the architecture-specified NZCV flags into the saved guest PSTATE.
+This is the EL2 half of our per-process record-and-
+replay design: from here a later patch will substitute the recorded /
+replayed value for the host read.  Wired as a sysreg-descs entry so
+the existing table-driven dispatcher in kvm_handle_sys_reg() picks it
+up without touching triage_sysreg_trap().
+
+pr_info_once() on first invocation gives an end-to-end breadcrumb that
+the forwarded trap reached KVM.
+
+Signed-off-by: Jason L. Wright <wrigjaso@isu.edu>
+
+--- a/arch/arm64/kvm/sys_regs.c
++++ b/arch/arm64/kvm/sys_regs.c
+@@ -19,6 +19,7 @@
+ #include <linux/printk.h>
+ #include <linux/uaccess.h>
+
++#include <asm/archrandom.h>
+ #include <asm/arm_pmuv3.h>
+ #include <asm/cacheflush.h>
+ #include <asm/cputype.h>
+@@ -505,6 +506,49 @@ static bool trap_raz_wi(struct kvm_vcpu *vcpu,
+ 		return read_zero(vcpu, p);
+ }
+
++/*
++ * RNDR / RNDRRS emulation for guest reads forwarded from EL3.
++ *
++ * Pairs with the TF-A RNG_TRAP_FORWARD_TO_EL2 platform handler: TF-A
++ * traps the guest MRS at EL3 (SCR_EL3.TRNDR=1) and re-injects it as
++ * an EL2 sync exception with ESR_EL2 = ESR_EL3.  We perform the
++ * physical read here and stage the result + NZCV flags into the
++ * guest's saved state.  Op2 distinguishes RNDR (0) from RNDRRS (1).
++ *
++ * Per ARM ARM: on success NZCV = 0b0000; on failure (no entropy
++ * available) NZCV = 0b0100 (Z=1) and the destination register reads
++ * as zero.  We treat absence of FEAT_RNG on the host as a failure
++ * rather than UNDEF, matching the architectural error path the guest
++ * already has to handle.
++ */
++static bool access_rng(struct kvm_vcpu *vcpu,
++		       struct sys_reg_params *p,
++		       const struct sys_reg_desc *r)
++{
++	unsigned long val = 0;
++	bool ok = false;
++
++	if (p->is_write)
++		return write_to_read_only(vcpu, p, r);
++
++	pr_info_once("kvm: rng-trap: RNDR%s trap forwarded from EL3 caught\n",
++		     r->Op2 == 1 ? "RS" : "");
++
++	if (__cpu_has_rng()) {
++		if (r->Op2 == 1)
++			ok = __arm64_rndrrs(&val);
++		else
++			ok = __arm64_rndr(&val);
++	}
++
++	p->regval = ok ? val : 0;
++	*vcpu_cpsr(vcpu) &= ~(PSR_N_BIT | PSR_Z_BIT | PSR_C_BIT | PSR_V_BIT);
++	if (!ok)
++		*vcpu_cpsr(vcpu) |= PSR_Z_BIT;
++
++	return true;
++}
++
+ /*
+  * ARMv8.1 mandates at least a trivial LORegion implementation, where all the
+  * RW registers are RES0 (which we can implement as RAZ/WI). On an ARMv8.0
+@@ -2660,6 +2704,9 @@ static const struct sys_reg_desc sys_reg_descs[] = {
+ 			     CTR_EL0_IDC_MASK |
+ 			     CTR_EL0_DminLine_MASK |
+ 			     CTR_EL0_IminLine_MASK),
++	{ SYS_DESC(SYS_RNDR_EL0), access_rng },
++	{ SYS_DESC(SYS_RNDRRS_EL0), access_rng },
++
+ 	{ SYS_DESC(SYS_SVCR), undef_access, reset_val, SVCR, 0, .visibility = sme_visibility  },
+ 	{ SYS_DESC(SYS_FPMR), undef_access, reset_val, FPMR, 0, .visibility = fp8_visibility },
+

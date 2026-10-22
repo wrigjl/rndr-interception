@@ -1,0 +1,11 @@
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -2816,6 +2816,8 @@
+ 		 in_hyp_mode ? "" : (cpus_have_final_cap(ARM64_KVM_HVHE) ?
+ 				     "h" : "n"));
+ 
++	kvm_info("rng-trap: dispatch hook stub present (patch 0001)\n");
++
+ 	/*
+ 	 * FIXME: Do something reasonable if kvm_init() fails after pKVM
+ 	 * hypervisor protection is finalized.

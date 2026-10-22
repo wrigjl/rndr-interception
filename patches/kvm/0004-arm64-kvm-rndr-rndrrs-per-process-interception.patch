@@ -1,0 +1,262 @@
+Index: linux-6.12.88/arch/arm64/include/asm/kvm_host.h
+===================================================================
+--- linux-6.12.88.orig/arch/arm64/include/asm/kvm_host.h
++++ linux-6.12.88/arch/arm64/include/asm/kvm_host.h
+@@ -13,6 +13,7 @@
+ 
+ #include <linux/arm-smccc.h>
+ #include <linux/bitmap.h>
++#include <linux/hashtable.h>
+ #include <linux/types.h>
+ #include <linux/jump_label.h>
+ #include <linux/kvm_types.h>
+@@ -276,10 +277,39 @@ enum fgt_group_id {
+ 	__NR_FGT_GROUP_IDS__
+ };
+ 
++/*
++ * Per-process RNDR/RNDRRS interception (record-and-replay).
++ * Entry in the per-VM hash table of guest TTBR0_EL1 base addresses whose
++ * EL0 RNDR/RNDRRS reads should trap to the guest as UNDEF (delivered as
++ * SIGILL) rather than being emulated.  Keyed by the page-table base
++ * of the monitored process.  TTBR0 ASID bits [63:48] are masked off
++ * before comparison; see RR_TTBR0_BADDR_MASK.
++ */
++#define RR_TTBR0_BADDR_MASK	GENMASK_ULL(47, 1)
++
++struct kvm_rr_monitored_ttbr0 {
++	struct hlist_node node;
++	unsigned long ttbr0;
++};
++
++long kvm_rr_register_ttbr0(struct kvm *kvm, unsigned long ttbr0);
++long kvm_rr_deregister_ttbr0(struct kvm *kvm, unsigned long ttbr0);
++bool kvm_rr_ttbr0_is_monitored(struct kvm *kvm, unsigned long ttbr0);
++void kvm_rr_destroy(struct kvm *kvm);
++
+ struct kvm_arch {
+ 	struct kvm_s2_mmu mmu;
+ 
+ 	/*
++	 * Per-process RNDR/RNDRRS interception: hash table of monitored
++	 * guest TTBR0_EL1 base addresses, populated by the guest module via
++	 * the RR vendor hypercalls.  Protected by rr_monitored_lock.
++	 */
++#define KVM_RR_MON_HT_BITS	6
++	DECLARE_HASHTABLE(rr_monitored_ttbr0s, KVM_RR_MON_HT_BITS);
++	spinlock_t rr_monitored_lock;
++
++	/*
+ 	 * Fine-Grained UNDEF, mimicking the FGT layout defined by the
+ 	 * architecture. We track them globally, as we present the
+ 	 * same feature-set to all vcpus.
+Index: linux-6.12.88/arch/arm64/kvm/arm.c
+===================================================================
+--- linux-6.12.88.orig/arch/arm64/kvm/arm.c
++++ linux-6.12.88/arch/arm64/kvm/arm.c
+@@ -167,12 +167,109 @@ static int kvm_arm_default_max_vcpus(voi
+  * @kvm:	pointer to the KVM struct
+  * @type:	kvm device type
+  */
++/*
++ * Per-process RNDR/RNDRRS interception (record-and-replay).
++ *
++ * The guest module registers the TTBR0_EL1 base address of each monitored
++ * process via the RR vendor hypercalls (see hypercalls.c).  When an EL0
++ * RNDR/RNDRRS read is forwarded from EL3 and lands in access_rng()
++ * (sys_regs.c), the handler checks whether the current TTBR0 is in this set
++ * and, if so, injects UNDEF instead of emulating.  One table per VM,
++ * not per vCPU.  TTBR0 values are stored already masked with
++ * RR_TTBR0_BADDR_MASK; callers must mask before lookup.
++ */
++long kvm_rr_register_ttbr0(struct kvm *kvm, unsigned long ttbr0)
++{
++	struct kvm_rr_monitored_ttbr0 *entry;
++
++	ttbr0 &= RR_TTBR0_BADDR_MASK;
++
++	spin_lock(&kvm->arch.rr_monitored_lock);
++	hash_for_each_possible(kvm->arch.rr_monitored_ttbr0s, entry, node,
++			       ttbr0) {
++		if (entry->ttbr0 == ttbr0) {
++			spin_unlock(&kvm->arch.rr_monitored_lock);
++			return SMCCC_RET_INVALID_PARAMETER; /* already there */
++		}
++	}
++	spin_unlock(&kvm->arch.rr_monitored_lock);
++
++	entry = kmalloc(sizeof(*entry), GFP_KERNEL_ACCOUNT);
++	if (!entry)
++		return SMCCC_RET_NOT_SUPPORTED;
++
++	entry->ttbr0 = ttbr0;
++
++	spin_lock(&kvm->arch.rr_monitored_lock);
++	hash_add(kvm->arch.rr_monitored_ttbr0s, &entry->node, ttbr0);
++	spin_unlock(&kvm->arch.rr_monitored_lock);
++
++	return SMCCC_RET_SUCCESS;
++}
++
++long kvm_rr_deregister_ttbr0(struct kvm *kvm, unsigned long ttbr0)
++{
++	struct kvm_rr_monitored_ttbr0 *entry;
++
++	ttbr0 &= RR_TTBR0_BADDR_MASK;
++
++	spin_lock(&kvm->arch.rr_monitored_lock);
++	hash_for_each_possible(kvm->arch.rr_monitored_ttbr0s, entry, node,
++			       ttbr0) {
++		if (entry->ttbr0 == ttbr0) {
++			hash_del(&entry->node);
++			spin_unlock(&kvm->arch.rr_monitored_lock);
++			kfree(entry);
++			return SMCCC_RET_SUCCESS;
++		}
++	}
++	spin_unlock(&kvm->arch.rr_monitored_lock);
++
++	return SMCCC_RET_INVALID_PARAMETER; /* not found */
++}
++
++bool kvm_rr_ttbr0_is_monitored(struct kvm *kvm, unsigned long ttbr0)
++{
++	struct kvm_rr_monitored_ttbr0 *entry;
++	bool found = false;
++
++	spin_lock(&kvm->arch.rr_monitored_lock);
++	hash_for_each_possible(kvm->arch.rr_monitored_ttbr0s, entry, node,
++			       ttbr0) {
++		if (entry->ttbr0 == ttbr0) {
++			found = true;
++			break;
++		}
++	}
++	spin_unlock(&kvm->arch.rr_monitored_lock);
++
++	return found;
++}
++
++void kvm_rr_destroy(struct kvm *kvm)
++{
++	struct kvm_rr_monitored_ttbr0 *entry;
++	struct hlist_node *tmp;
++	int bkt;
++
++	spin_lock(&kvm->arch.rr_monitored_lock);
++	hash_for_each_safe(kvm->arch.rr_monitored_ttbr0s, bkt, tmp, entry,
++			   node) {
++		hash_del(&entry->node);
++		kfree(entry);
++	}
++	spin_unlock(&kvm->arch.rr_monitored_lock);
++}
++
+ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
+ {
+ 	int ret;
+ 
+ 	mutex_init(&kvm->arch.config_lock);
+ 
++	hash_init(kvm->arch.rr_monitored_ttbr0s);
++	spin_lock_init(&kvm->arch.rr_monitored_lock);
++
+ #ifdef CONFIG_LOCKDEP
+ 	/* Clue in lockdep that the config_lock must be taken inside kvm->lock */
+ 	mutex_lock(&kvm->lock);
+@@ -271,6 +368,8 @@ void kvm_arch_destroy_vm(struct kvm *kvm
+ 	kvm_unshare_hyp(kvm, kvm + 1);
+ 
+ 	kvm_arm_teardown_hypercalls(kvm);
++
++	kvm_rr_destroy(kvm);
+ }
+ 
+ static bool kvm_has_full_ptr_auth(void)
+Index: linux-6.12.88/arch/arm64/kvm/hypercalls.c
+===================================================================
+--- linux-6.12.88.orig/arch/arm64/kvm/hypercalls.c
++++ linux-6.12.88/arch/arm64/kvm/hypercalls.c
+@@ -9,6 +9,25 @@
+ #include <kvm/arm_hypercalls.h>
+ #include <kvm/arm_psci.h>
+ 
++/*
++ * Vendor hypercalls for per-process RNDR/RNDRRS interception
++ * (record-and-replay).  The guest module registers/deregisters the TTBR0_EL1
++ * base of each monitored process; arg1 carries the TTBR0 base.  The
++ * SMCCC vendor-hyp owner is used for the private ABI.  Function
++ * numbers are chosen high to avoid the pKVM-reserved vendor-hyp range.
++ */
++#define ARM_SMCCC_KVM_FUNC_RR_REGISTER		0x100
++#define ARM_SMCCC_KVM_FUNC_RR_DEREGISTER	0x101
++
++#define ARM_SMCCC_VENDOR_HYP_KVM_RR_REGISTER_FUNC_ID			\
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_64,	\
++			   ARM_SMCCC_OWNER_VENDOR_HYP,			\
++			   ARM_SMCCC_KVM_FUNC_RR_REGISTER)
++#define ARM_SMCCC_VENDOR_HYP_KVM_RR_DEREGISTER_FUNC_ID			\
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_64,	\
++			   ARM_SMCCC_OWNER_VENDOR_HYP,			\
++			   ARM_SMCCC_KVM_FUNC_RR_DEREGISTER)
++
+ #define KVM_ARM_SMCCC_STD_FEATURES				\
+ 	GENMASK(KVM_REG_ARM_STD_BMAP_BIT_COUNT - 1, 0)
+ #define KVM_ARM_SMCCC_STD_HYP_FEATURES				\
+@@ -75,6 +94,9 @@ static bool kvm_smccc_default_allowed(u3
+ 	 */
+ 	case ARM_SMCCC_VERSION_FUNC_ID:
+ 	case ARM_SMCCC_ARCH_FEATURES_FUNC_ID:
++	/* Per-process RNDR interception vendor hypercalls (record-and-replay). */
++	case ARM_SMCCC_VENDOR_HYP_KVM_RR_REGISTER_FUNC_ID:
++	case ARM_SMCCC_VENDOR_HYP_KVM_RR_DEREGISTER_FUNC_ID:
+ 		return true;
+ 	default:
+ 		/* PSCI 0.2 and up is in the 0:0x1f range */
+@@ -364,6 +386,14 @@ int kvm_smccc_call_handler(struct kvm_vc
+ 	case ARM_SMCCC_VENDOR_HYP_KVM_PTP_FUNC_ID:
+ 		kvm_ptp_get_time(vcpu, val);
+ 		break;
++	case ARM_SMCCC_VENDOR_HYP_KVM_RR_REGISTER_FUNC_ID:
++		val[0] = kvm_rr_register_ttbr0(vcpu->kvm,
++					       smccc_get_arg1(vcpu));
++		break;
++	case ARM_SMCCC_VENDOR_HYP_KVM_RR_DEREGISTER_FUNC_ID:
++		val[0] = kvm_rr_deregister_ttbr0(vcpu->kvm,
++						 smccc_get_arg1(vcpu));
++		break;
+ 	case ARM_SMCCC_TRNG_VERSION:
+ 	case ARM_SMCCC_TRNG_FEATURES:
+ 	case ARM_SMCCC_TRNG_GET_UUID:
+Index: linux-6.12.88/arch/arm64/kvm/sys_regs.c
+===================================================================
+--- linux-6.12.88.orig/arch/arm64/kvm/sys_regs.c
++++ linux-6.12.88/arch/arm64/kvm/sys_regs.c
+@@ -534,6 +534,27 @@ static bool access_rng(struct kvm_vcpu *
+ 	pr_info_once("kvm: rng-trap: RNDR%s trap forwarded from EL3 caught\n",
+ 		     r->Op2 == 1 ? "RS" : "");
+ 
++	/*
++	 * Per-process interception (record-and-replay).  Only
++	 * user-mode (EL0) reads from a monitored address space are
++	 * intercepted; the process is identified by TTBR0_EL1 with the ASID
++	 * masked off (its page-table base).  A monitored EL0 read gets
++	 * an UNDEF injected, so the guest kernel delivers
++	 * SIGILL to the tracee, where a replay supervisor substitutes a
++	 * recorded value.  Guest-kernel (EL1+) reads and unmonitored EL0
++	 * reads fall through to transparent emulation, leaving the rest
++	 * of the system untouched.
++	 */
++	if (!vcpu_mode_priv(vcpu)) {
++		unsigned long ttbr0 = vcpu_read_sys_reg(vcpu, TTBR0_EL1) &
++				      RR_TTBR0_BADDR_MASK;
++
++		if (kvm_rr_ttbr0_is_monitored(vcpu->kvm, ttbr0)) {
++			kvm_inject_undefined(vcpu);
++			return false;
++		}
++	}
++
+ 	if (__cpu_has_rng()) {
+ 		if (r->Op2 == 1)
+ 			ok = __arm64_rndrrs(&val);
