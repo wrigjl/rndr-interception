@@ -1,5 +1,10 @@
 # Artifact: Upstreaming Replay Support for Hardware Entropy on Arm
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23581742.svg)](https://doi.org/10.5281/zenodo.23581742)
+
+Archived release: v1.0.0, DOI 10.5281/zenodo.23581742 (concept DOI for
+all versions: 10.5281/zenodo.23581741).
+
 Artifact for the CSET 2026 paper "Three Months to Flip One Bit:
 Upstreaming Replay Support for Hardware Entropy on ARM" (Jason L. Wright
 and Thomas L. Baldwin, Idaho State University). The reviewer bundle was
@@ -73,4 +78,4 @@ uninterrupted session on 2026-08-12:
 ## License
 
 BSD-2-Clause (see `LICENSE`), copyright Jason L. Wright and Thomas L.
-Baldwin. Archived on Zenodo; cite the DOI given in the GitHub release.
+Baldwin. Archived on Zenodo as DOI 10.5281/zenodo.23581742.
