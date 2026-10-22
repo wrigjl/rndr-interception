@@ -1,0 +1,29 @@
+{
+  "title": "Artifact: per-process RNDR/RNDRRS interception for record and replay on Arm",
+  "upload_type": "software",
+  "description": "Research-side components behind the CSET 2026 paper \"Three Months to Flip One Bit: Upstreaming Replay Support for Hardware Entropy on ARM\": the Trusted Firmware-A EL3-to-EL2 trap forwarder, the Linux/KVM per-process dispatch patches, the guest monitor module, the rr.soft RNDR/RNDRRS substitution engine, test harnesses, the substrate-survey probe, and the raw demonstration evidence captured on the stock QEMU v11.1.0 release. The platform components (FEAT_RNG_TRAP emulation in QEMU 11.1 and the EL3 handler for QEMU's virt platform in TF-A mainline) are upstream and not part of this archive.",
+  "creators": [
+    {
+      "name": "Wright, Jason L.",
+      "affiliation": "Idaho State University"
+    },
+    {
+      "name": "Baldwin, Thomas L.",
+      "affiliation": "Idaho State University"
+    }
+  ],
+  "license": "BSD-2-Clause",
+  "access_right": "open",
+  "keywords": [
+    "record and replay",
+    "determinism",
+    "hardware entropy",
+    "ARM",
+    "FEAT_RNG_TRAP",
+    "QEMU",
+    "Trusted Firmware-A",
+    "KVM",
+    "rr",
+    "reproducibility"
+  ]
+}

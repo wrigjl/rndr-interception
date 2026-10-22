@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this artifact, please cite the CSET 2026 paper and the archived artifact."
+title: "Artifact: per-process RNDR/RNDRRS interception for record and replay on Arm"
+type: software
+version: 1.0.0
+date-released: 2026-10-22
+license: BSD-2-Clause
+repository-code: "https://github.com/wrigjl/rndr-interception"
+authors:
+  - family-names: Wright
+    given-names: Jason L.
+    affiliation: Idaho State University
+  - family-names: Baldwin
+    given-names: Thomas L.
+    affiliation: Idaho State University
+preferred-citation:
+  type: conference-paper
+  title: "Three Months to Flip One Bit: Upstreaming Replay Support for Hardware Entropy on ARM"
+  authors:
+    - family-names: Wright
+      given-names: Jason L.
+    - family-names: Baldwin
+      given-names: Thomas L.
+  collection-title: "Cyber Security Experimentation and Test Workshop (CSET 2026)"
+  year: 2026
+  publisher:
+    name: IEEE Computer Society
